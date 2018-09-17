@@ -19,7 +19,7 @@ class Generator(gluon.nn.HybridBlock):
                  normalization='batch',
                  final_activation=None):
         super(Generator, self).__init__()
-        self.alpha = 1
+        self.alpha = 0
 
         with self.name_scope():
             self.input = nn.HybridSequential(prefix='input')
@@ -63,11 +63,12 @@ class Generator(gluon.nn.HybridBlock):
         return x
 
 class GeneratorWrapper():
-    def __init__(self, init_scale=4, max_scale=16, features=8192):
+    def __init__(self, ctx, init_scale=4, max_scale=16, features=8192):
         self.scale = init_scale
+        self.ctx = ctx
         self.features = features
         self.generator = Generator(self.features, self.scale)
-        self.generator.collect_params().initialize(mx.init.Xavier(magnitude=2.24), ctx=mx.cpu())
+        self.generator.collect_params().initialize(mx.init.Xavier(magnitude=2.24), ctx=self.ctx)
 
     def forward(self, x):
         return self.generator(x)
@@ -76,8 +77,9 @@ class GeneratorWrapper():
         self.generator.save_params('tmp')
         self.scale += 1
         self.generator = Generator(self.features, self.scale)
-        self.generator.collect_params().initialize(mx.init.Xavier(magnitude=2.24), ctx=mx.cpu())
-        self.generator.load_params('tmp', ctx=mx.cpu(), allow_missing=True, ignore_extra=True)
+        self.generator.collect_params().initialize(mx.init.Xavier(magnitude=2.24), ctx=self.ctx)
+        self.generator.load_params('tmp', ctx=self.ctx, allow_missing=True, ignore_extra=True)
+        self.alpha=1
 
 class Discriminator(gluon.nn.HybridBlock):
     """
@@ -93,18 +95,18 @@ class Discriminator(gluon.nn.HybridBlock):
     def __init__(self, k, scale,
                  activation='relu',
                  normalization='batch'):
-        super(Generator, self).__init__()
+        super(Discriminator, self).__init__()
         self.alpha = 1
-
+        i=0
         with self.name_scope():
 
             self.fromrgb = nn.HybridSequential(prefix='output')
             self.fromrgb.add(nn.Conv2D(self.nf(scale), 3, 1, 1, use_bias=True, prefix=f'fromrgb_{i}'))
-            self.output.add(nn.Activation(activation))
+            self.fromrgb.add(nn.Activation(activation))
 
             self.fromrgb_sidechain = nn.HybridSequential(prefix='output')
             self.fromrgb_sidechain.add(nn.Conv2D(self.nf(scale)+1, 3, 1, 1, use_bias=True, prefix=f'fromrgb_{i+1}'))
-            self.torgb_sidechain.add(nn.Activation(activation))
+            self.fromrgb_sidechain.add(nn.Activation(activation))
 
             self.growth = nn.HybridSequential(prefix='growth')
 
@@ -119,8 +121,8 @@ class Discriminator(gluon.nn.HybridBlock):
             self.downscale.add(nn.AvgPool2D())
 
             self.result = nn.HybridSequential(prefix='input')
-            self.result.add(nn.Dense(100, bias=True))
-            self.result.add(nn.Dense(1, bias=True))
+            self.result.add(nn.Dense(100))
+            self.result.add(nn.Dense(1))
 
     def set_alpha(self, alpha):
         self.alpha = alpha
@@ -142,18 +144,46 @@ class Discriminator(gluon.nn.HybridBlock):
         return x
 
 class DiscriminatorWrapper():
-    def __init__(self, init_scale=4, max_scale=16, features=8192):
+    def __init__(self, ctx, init_scale=4, max_scale=16, features=8192):
         self.scale = init_scale
         self.features = features
-        self.generator = Discriminator(self.features, self.scale)
-        self.generator.collect_params().initialize(mx.init.Xavier(magnitude=2.24), ctx=mx.cpu())
+        self.ctx = ctx
+        self.discriminator = Discriminator(self.features, self.scale)
+        self.discriminator.collect_params().initialize(mx.init.Xavier(magnitude=2.24), ctx=self.ctx)
+        self.trainer = gluon.Trainer(self.discriminator.collect_params(), 'Adam', {'learning_rate': .0001})
 
-    def forward(self, x):
-        return self.generator(x)
+    def train(self, x, true_image, generator):
+        data_fake = gluon.utils.split_and_load(x, self.ctx)
+        data_true = gluon.utils.split_and_load(true_image, self.ctx)
+
+        result = [generator.forward(X) for X in data_fake]
+        with autograd.record():
+
+            disc_fake = [self.discriminator(X) for X in result]
+            disc_real = [self.discriminator(X) for X in data_true]
+
+            d_loss_fake = [
+                (Y - nd.repeat(nd.expand_dims(nd.mean(X, axis=0), axis=0), repeats=Y.shape[0], axis=0) - 1) ** 2
+                for
+                X, Y in zip(disc_fake, disc_real)]
+            d_loss_real = [
+                (X - nd.repeat(nd.expand_dims(nd.mean(Y, axis=0), axis=0), repeats=X.shape[0], axis=0) + 1) ** 2
+                for
+                X, Y in zip(disc_fake, disc_real)]
+
+            d_loss_total = [nd.mean(X + Y) * 0.5 for X, Y in zip(d_loss_real, d_loss_fake)]
+
+            for l in d_loss_total:
+                l.backward()
+
+            self.trainer_d.step(x[0].shape[0])
+            curr_dloss = nd.mean(sum(d_loss_total) / len(self.ctx)).asscalar()
+        return curr_dloss
 
     def increase_scale(self):
         self.generator.save_params('tmp')
         self.scale += 1
         self.generator = Generator(self.features, self.scale)
-        self.generator.collect_params().initialize(mx.init.Xavier(magnitude=2.24), ctx=mx.cpu())
-        self.generator.load_params('tmp', ctx=mx.cpu(), allow_missing=True, ignore_extra=True)
+        self.generator.collect_params().initialize(mx.init.Xavier(magnitude=2.24), ctx=self.ctx)
+        self.generator.load_params('tmp', ctx=self.ctx, allow_missing=True, ignore_extra=True)
+
