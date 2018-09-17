@@ -63,6 +63,11 @@ class Generator(gluon.nn.HybridBlock):
         return x
 
 class GeneratorWrapper():
+    """
+    Generator training wrapper
+    """
+
+
     def __init__(self, ctx, init_scale=4, max_scale=16, features=8192):
         self.scale = init_scale
         self.ctx = ctx
@@ -74,16 +79,17 @@ class GeneratorWrapper():
         return self.generator(x)
 
     def increase_scale(self):
-        self.generator.save_params('tmp')
+        # TODO USE IN_MEMORY FILE FOR SPEED
+        self.generator.save_params('tmp_G')
         self.scale += 1
         self.generator = Generator(self.features, self.scale)
         self.generator.collect_params().initialize(mx.init.Xavier(magnitude=2.24), ctx=self.ctx)
-        self.generator.load_params('tmp', ctx=self.ctx, allow_missing=True, ignore_extra=True)
+        self.generator.load_params('tmp_G', ctx=self.ctx, allow_missing=True, ignore_extra=True)
         self.alpha=1
 
 class Discriminator(gluon.nn.HybridBlock):
     """
-    Generator neural template
+    Dicriminator neural template
     """
 
     def nf(self, stage):
@@ -144,6 +150,9 @@ class Discriminator(gluon.nn.HybridBlock):
         return x
 
 class DiscriminatorWrapper():
+    """
+    Discriminator training wrapper
+    """
     def __init__(self, ctx, init_scale=4, max_scale=16, features=8192):
         self.scale = init_scale
         self.features = features
@@ -181,9 +190,10 @@ class DiscriminatorWrapper():
         return curr_dloss
 
     def increase_scale(self):
-        self.generator.save_params('tmp')
+        #TODO USE IN_MEMORY FILE FOR SPEED
+        self.generator.save_params('tmp_D')
         self.scale += 1
         self.generator = Generator(self.features, self.scale)
         self.generator.collect_params().initialize(mx.init.Xavier(magnitude=2.24), ctx=self.ctx)
-        self.generator.load_params('tmp', ctx=self.ctx, allow_missing=True, ignore_extra=True)
+        self.generator.load_params('tmp_D', ctx=self.ctx, allow_missing=True, ignore_extra=True)
 

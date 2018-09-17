@@ -26,6 +26,7 @@ for resolution in (32,64,128):
         latent_z = mx.nd.random_normal(0, 1, shape=(BATCH_SIZE, 100, 1, 1), ctx=mx.cpu())
         d_loss = discriminator.train(latent_z, true_image, generator)
         logger.add_scalar('D_loss', d_loss, i)
+    #TODO CHANGE RESOLUTION
 
 
 # latent_z = mx.nd.random_normal(0, 1, shape=(4, 100, 1, 1), ctx=mx.cpu())
