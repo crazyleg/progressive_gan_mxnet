@@ -11,7 +11,7 @@ class ArtLoader(gluon.data.Dataset):
 
         self.folder = folder
         self.final_resolution = final_resolution
-        self.images = [x for x in os.listdir(self.folder) if x.endswith('.png')]
+        self.images = [x for x in os.listdir(self.folder) if x.endswith('.png') or x.endswith('.jpg')]
         self.len = len(self.images)
 
     def __getitem__(self, item):
@@ -27,16 +27,16 @@ class ArtLoader(gluon.data.Dataset):
         img = cv2.resize(img, size)
         h, w, _ = img.shape
         if h<w:
-            x = random.randint(0,w-self.final_resolution-1)
+            x = random.randint(0, w - self.final_resolution)
             img = img[:, x:x+self.final_resolution,:]
         else:
-            x = random.randint(0, h - self.final_resolution - 1)
+            x = random.randint(0, h - self.final_resolution)
             img = img[x:x + self.final_resolution,:,:]
         if random.random()<0.5:
             img = img[::-1,:,:]
 
-        img = np.transpose(img, axes=(2,0,1)).astype(np.float32)
+        img = np.transpose(img, axes=(2,0,1)).astype(np.float32) / 255.0
         return img
 
     def __len__(self):
-        return self.len
+        return self.len*10000

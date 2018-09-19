@@ -3,64 +3,104 @@ import mxnet as mx
 from mxnet.gluon import nn
 from mxnet import nd, autograd, gluon, image
 
+
+def nf(stage):
+    """
+    Function te get number of feaatures for each progressive scale
+    Credit goes to original NVIDIA tensorflow implementation
+
+    """
+    fmap_base = 8192  # Overall multiplier for the number of feature maps.
+    fmap_decay = 1.0  # log2 feature map reduction when doubling the resolution.
+    fmap_max = 512
+    return min(int(fmap_base / (2.0 ** (stage * fmap_decay))), fmap_max)
+
+
 class Generator(gluon.nn.HybridBlock):
     """
     Generator neural template
     """
-
-    def nf(self, stage):
-        fmap_base = 8192  # Overall multiplier for the number of feature maps.
-        fmap_decay = 1.0  # log2 feature map reduction when doubling the resolution.
-        fmap_max = 512
-        return min(int(fmap_base / (2.0 ** (stage * fmap_decay))), fmap_max)
 
     def __init__(self, k, scale,
                  activation='relu',
                  normalization='batch',
                  final_activation=None):
         super(Generator, self).__init__()
-        self.alpha = 0
+        self.alpha = 1
+        self.scale = scale
+        self.normalization = normalization
+        self.activation = activation
+        self.network = dict()
+        name = f'input'
+        self.network[name] = nn.HybridSequential()
+        with self.network[name].name_scope():
+            self.network[name].add(nn.Conv2DTranspose(nf(1), 4, 2, 1, use_bias=False))
+            if 'batch' in normalization:
+                self.network[name].add(nn.BatchNorm())
+            self.network[name].add(nn.Activation(activation))
 
-        with self.name_scope():
-            self.input = nn.HybridSequential(prefix='input')
-            self.input.add(nn.Conv2DTranspose(self.nf(1), 4, 2, 1, use_bias=False))
-            if 'batch' in normalization: self.input.add(nn.BatchNorm())
-            self.input.add(nn.Activation(activation))
+        for i in range(self.scale+1):
+            name = f'growth_{i}'
+            self.network[name] = nn.HybridSequential()
+            with self.network[name].name_scope():
+                self.network[name].add(nn.Conv2DTranspose(nf(i), 4, 2, 1, use_bias=False))
+                if 'batch' in normalization:
+                    self.network[name].add(nn.BatchNorm())
+                self.network[name].add(nn.Activation(activation))
 
-            self.growth = nn.HybridSequential(prefix='growth')
+        name = f'to_rgb_main'
+        self.network[name] = nn.HybridSequential()
+        with self.network[name].name_scope():
+            self.network[name].add(nn.Conv2DTranspose(3, 3, 1, 1, use_bias=True))
+            if final_activation != None:
+                self.network[name].add(nn.Activation(final_activation))
 
-            for i in range(scale):
-                self.growth.add(nn.Conv2DTranspose(self.nf(i), 4, 2, 1, use_bias=False, prefix=f'growth_conv_{i}'))
-                if 'batch' in normalization: self.growth.add(nn.BatchNorm(prefix=f'growth_batch_{i}'))
-                self.growth.add(nn.Activation(activation))
+        name = f'to_rgb_growth'
+        self.network[name] = nn.HybridSequential()
+        with self.network[name].name_scope():
+            self.network[name].add(nn.Conv2DTranspose(3, 3, 1, 1, use_bias=True))
+            if final_activation != None:
+                self.network[name].add(nn.Activation(final_activation))
 
-
-            self.torgb = nn.HybridSequential(prefix='output')
-            self.torgb.add(nn.Conv2DTranspose(3, 3, 1, 1, use_bias=True, prefix=f'torgb_{i}'))
-            if final_activation != None: self.output.add(nn.Activation(final_activation))
-
-            self.torgb_sidechain = nn.HybridSequential(prefix='output')
-            self.torgb_sidechain.add(nn.Conv2DTranspose(3, 3, 1, 1, use_bias=True, prefix=f'torgb_{i+1}'))
-            if final_activation != None: self.torgb_sidechain.add(nn.Activation(final_activation))
     def set_alpha(self, alpha):
         self.alpha = alpha
 
     def hybrid_forward(self, F, x, *args, **kwargs):
-        main_path = self.input(x)
+        main_path = self.network['input'](x)
 
-        for i in range(len(self.growth)-3):
-            main_path = self.growth[i](main_path)
+        for i in range(0,self.scale):
+            main_path = self.network[f'growth_{i}'](main_path)
+
         side_chain = main_path
+        side_chain = self.network[f'growth_{self.scale}'](side_chain)
 
-        for i in range(len(self.growth)-3, len(self.growth)):
-            side_chain = self.growth[i](side_chain)
-
-        main_path = self.torgb(main_path)
+        main_path =  self.network[f'to_rgb_main'](main_path)
 
         main_path = F.UpSampling(main_path, scale=2, sample_type='nearest')
-        side_chain = self.torgb_sidechain(side_chain)
-        x = main_path*self.alpha + side_chain*(1-self.alpha)
+        side_chain = self.network[f'to_rgb_growth'](side_chain)
+        x = main_path*(1-self.alpha) + side_chain*(self.alpha)
         return x
+
+    def change_scale(self, ctx):
+        self.scale += 1
+        self.network[f'to_rgb_main'] = self.network[f'to_rgb_growth']
+        self.network[f'to_rgb_growth'] = None
+        name = f'growth_{self.scale}'
+        self.network[name] = nn.HybridSequential()
+        with self.network[name].name_scope():
+            self.network[name].add(nn.Conv2DTranspose(nf(self.scale), 4, 2, 1, use_bias=False))
+            if 'batch' in self.normalization:
+                self.network[name].add(nn.BatchNorm())
+            self.network[name].add(nn.Activation(self.activation))
+
+        name = f'to_rgb_growth'
+        self.network[name] = nn.HybridSequential()
+        with self.network[name].name_scope():
+            self.network[name].add(nn.Conv2DTranspose(3, 3, 1, 1, use_bias=True))
+
+
+        self.network[f'to_rgb_growth'].collect_params().initialize(mx.init.Xavier(magnitude=2.24), ctx=ctx)
+        self.network[f'growth_{self.scale}'].collect_params().initialize(mx.init.Xavier(magnitude=2.24), ctx=ctx)
 
 class GeneratorWrapper():
     """
@@ -68,132 +108,196 @@ class GeneratorWrapper():
     """
 
 
-    def __init__(self, ctx, init_scale=4, max_scale=16, features=8192):
+    def __init__(self, ctx, init_scale=3, max_scale=16, features=8192):
         self.scale = init_scale
         self.ctx = ctx
         self.features = features
         self.generator = Generator(self.features, self.scale)
+        [self.generator.register_child(self.generator.network[x]) for x in self.generator.network.keys()]
         self.generator.collect_params().initialize(mx.init.Xavier(magnitude=2.24), ctx=self.ctx)
+        self.trainer = gluon.Trainer(self.generator.collect_params(), 'Adam', {'learning_rate': .0001, 'beta1':0.5})
 
     def forward(self, x):
         return self.generator(x)
 
+
+    def save(self, name):
+        self.generator.save_parameters(name)
+
+    def load(self, name):
+        self.generator.load_parameters(name)
+
+
+    def train(self, true_image, latent_z, discriminator):
+        data_fake = gluon.utils.split_and_load(latent_z, self.ctx)
+        data_true = gluon.utils.split_and_load(true_image, self.ctx)
+
+        with autograd.record():
+            data_fake = [self.generator(X) for X in data_fake]
+            disc_fake = [discriminator.discriminator(X) for X in data_fake]
+            adv_loss = [nd.mean((X - 1) ** 2) for X in disc_fake]
+            # disc_real = [discriminator.discriminator(X) for X in data_true]
+            #
+            # adv_loss = [(nd.mean(
+            #     (Y - nd.repeat(nd.expand_dims(nd.mean(X, axis=0), axis=0), repeats=Y.shape[0], axis=0) + 1) ** 2)
+            #              +
+            #              nd.mean((X - nd.repeat(nd.expand_dims(nd.mean(Y, axis=0), axis=0), repeats=Y.shape[0],
+            #                                     axis=0) - 1) ** 2))
+            #             for X, Y in zip(disc_fake, disc_real)]
+        for l in adv_loss:
+            l.backward()
+
+        self.trainer.step(data_true[0].shape[0])
+        curr_gloss = nd.mean(sum(adv_loss) / len(self.ctx)).asscalar()
+
+        return curr_gloss
+
     def increase_scale(self):
-        # TODO USE IN_MEMORY FILE FOR SPEED
-        self.generator.save_params('tmp_G')
-        self.scale += 1
-        self.generator = Generator(self.features, self.scale)
-        self.generator.collect_params().initialize(mx.init.Xavier(magnitude=2.24), ctx=self.ctx)
-        self.generator.load_params('tmp_G', ctx=self.ctx, allow_missing=True, ignore_extra=True)
-        self.alpha=1
+        self.generator.change_scale(self.ctx)
 
 class Discriminator(gluon.nn.HybridBlock):
     """
     Dicriminator neural template
     """
 
-    def nf(self, stage):
-        fmap_base = 8192  # Overall multiplier for the number of feature maps.
-        fmap_decay = 1.0  # log2 feature map reduction when doubling the resolution.
-        fmap_max = 512
-        return min(int(fmap_base / (2.0 ** (stage * fmap_decay))), fmap_max)
-
     def __init__(self, k, scale,
                  activation='relu',
                  normalization='batch'):
         super(Discriminator, self).__init__()
-        self.alpha = 1
+        self.alpha = 0
+        self.scale=scale
+        self.activation = activation
+        self.normalization = normalization
         i=0
-        with self.name_scope():
-
-            self.fromrgb = nn.HybridSequential(prefix='output')
-            self.fromrgb.add(nn.Conv2D(self.nf(scale), 3, 1, 1, use_bias=True, prefix=f'fromrgb_{i}'))
-            self.fromrgb.add(nn.Activation(activation))
-
-            self.fromrgb_sidechain = nn.HybridSequential(prefix='output')
-            self.fromrgb_sidechain.add(nn.Conv2D(self.nf(scale)+1, 3, 1, 1, use_bias=True, prefix=f'fromrgb_{i+1}'))
-            self.fromrgb_sidechain.add(nn.Activation(activation))
-
-            self.growth = nn.HybridSequential(prefix='growth')
-
-            for i in range(scale):
-                self.growth.add(nn.Conv2DTranspose(self.nf(i), 4, 2, 1, use_bias=False, prefix=f'growth_conv_{i}'))
-                if 'batch' in normalization: self.growth.add(nn.BatchNorm(prefix=f'growth_batch_{i}'))
-                self.growth.add(nn.Activation(activation))
-                self.growth.add(nn.AvgPool2D())
+        self.network = dict()
 
 
-            self.downscale = nn.HybridSequential(prefix='input')
-            self.downscale.add(nn.AvgPool2D())
+        name = f'fromrgb_growth'
+        self.network[name] = nn.HybridSequential(prefix=name)
+        with self.network[name].name_scope():
+            self.network[name].add(nn.Conv2D(nf(scale), 3, 1, 1, use_bias=True))
+            self.network[name].add(nn.Activation(activation))
 
-            self.result = nn.HybridSequential(prefix='input')
-            self.result.add(nn.Dense(100))
-            self.result.add(nn.Dense(1))
+        name = f'fromrgb_main'
+        self.network[name] = nn.HybridSequential(prefix=name)
+        with self.network[name].name_scope():
+            self.network[name].add(nn.Conv2D(nf(scale-1), 3, 1, 1, use_bias=True))
+            self.network[name].add(nn.Activation(activation))
+
+
+
+        for i in range(scale, 1, -1):
+            name = f'growth_{i}'
+            self.network[name] = nn.HybridSequential(prefix=name)
+            with self.network[name].name_scope():
+                self.network[name].add(nn.Conv2D(nf(i), 3, 1, 1, use_bias=False))
+                if 'batch' in normalization: self.network[name].add(nn.BatchNorm())
+                self.network[name].add(nn.Activation(activation))
+                self.network[name].add(nn.AvgPool2D())
+
+        self.network['downscale'] = nn.HybridSequential()
+        self.network['downscale'].add(nn.AvgPool2D())
+
+        self.network['result'] = nn.HybridSequential()
+        self.network['result'].add(nn.Conv2D(1000, 1, 1, 0, use_bias=True))
+        self.network['result'].add(nn.Conv2D(1, 1, 1, 0, use_bias=True))
+
+    def change_scale(self, ctx):
+
+        self.scale += 1
+        self.network[f'fromrgb_main'] = self.network[f'fromrgb_growth']
+
+        name = f'fromrgb_growth'
+        self.network[name] = nn.HybridSequential(prefix=name)
+        with self.network[name].name_scope():
+            self.network[name].add(nn.Conv2D(nf(self.scale), 3, 1, 1, use_bias=True))
+            self.network[name].add(nn.Activation(self.activation))
+
+        name = f'growth_{self.scale}'
+        self.network[name] = nn.HybridSequential()
+        with self.network[name].name_scope():
+            self.network[name].add(nn.Conv2D(nf(self.scale-1), 3, 1, 1, use_bias=False))
+            if 'batch' in self.normalization: self.network[name].add(nn.BatchNorm())
+            self.network[name].add(nn.Activation(self.activation))
+            self.network[name].add(nn.AvgPool2D())
+
+        self.network[f'fromrgb_growth'].collect_params().initialize(mx.init.Xavier(magnitude=2.24), ctx=ctx)
+        self.network[f'growth_{self.scale}'].collect_params().initialize(mx.init.Xavier(magnitude=2.24), ctx=ctx)
 
     def set_alpha(self, alpha):
         self.alpha = alpha
 
+
+
     def hybrid_forward(self, F, x, *args, **kwargs):
-        main_path = self.fromrgb(x)
-        side_chain = self.downscale(x)
-        side_chain = self.fromrgb_sidechain(side_chain)
+        main_path = self.network[f'fromrgb_growth'](x)
+        main_path = self.network[f'growth_{self.scale}'](main_path)
 
-        for i in range(0,3):
-            main_path = self.growth[i](main_path)
+        side_chain = self.network['downscale'](x)
+        side_chain = self.network[f'fromrgb_main'](side_chain)
 
-        x = side_chain*self.alpha + main_path*(1-self.alpha)
+        x = side_chain * (1-self.alpha) + main_path * (self.alpha)
 
-        for i in range(3,len(self.growth)):
-            x = self.growth[i](x)
+        for i in range(self.scale-1, 1, -1):
+            x = self.network[f'growth_{i}'](x)
 
-        x=self.result(x)
+        x=self.network['result'](x)
         return x
 
 class DiscriminatorWrapper():
     """
     Discriminator training wrapper
     """
-    def __init__(self, ctx, init_scale=4, max_scale=16, features=8192):
+    def __init__(self, ctx, init_scale=5, max_scale=16, features=8192):
         self.scale = init_scale
         self.features = features
         self.ctx = ctx
         self.discriminator = Discriminator(self.features, self.scale)
+        [self.discriminator.register_child(self.discriminator.network[x]) for x in self.discriminator.network.keys()]
         self.discriminator.collect_params().initialize(mx.init.Xavier(magnitude=2.24), ctx=self.ctx)
-        self.trainer = gluon.Trainer(self.discriminator.collect_params(), 'Adam', {'learning_rate': .0001})
+        self.trainer = gluon.Trainer(self.discriminator.collect_params(), 'Adam', {'learning_rate': .0001, 'beta1':0.5})
 
-    def train(self, x, true_image, generator):
-        data_fake = gluon.utils.split_and_load(x, self.ctx)
+    def forward(self, x):
+        return self.discriminator(x)
+
+    def save(self, name):
+        self.discriminator.save_parameters(name)
+
+    def load(self, name):
+        self.discriminator.load_parameters(name)
+
+    def train(self, true_image, latent_z, generator):
+        data_fake = gluon.utils.split_and_load(latent_z, self.ctx)
         data_true = gluon.utils.split_and_load(true_image, self.ctx)
 
-        result = [generator.forward(X) for X in data_fake]
+        result = [generator.generator(X) for X in data_fake]
         with autograd.record():
 
             disc_fake = [self.discriminator(X) for X in result]
             disc_real = [self.discriminator(X) for X in data_true]
 
-            d_loss_fake = [
-                (Y - nd.repeat(nd.expand_dims(nd.mean(X, axis=0), axis=0), repeats=Y.shape[0], axis=0) - 1) ** 2
-                for
-                X, Y in zip(disc_fake, disc_real)]
-            d_loss_real = [
-                (X - nd.repeat(nd.expand_dims(nd.mean(Y, axis=0), axis=0), repeats=X.shape[0], axis=0) + 1) ** 2
-                for
-                X, Y in zip(disc_fake, disc_real)]
+            # d_loss_fake = [
+            #     (Y - nd.repeat(nd.expand_dims(nd.mean(X, axis=0), axis=0), repeats=Y.shape[0], axis=0) - 1) ** 2
+            #     for
+            #     X, Y in zip(disc_fake, disc_real)]
+            # d_loss_real = [
+            #     (X - nd.repeat(nd.expand_dims(nd.mean(Y, axis=0), axis=0), repeats=X.shape[0], axis=0) + 1) ** 2
+            #     for
+            #     X, Y in zip(disc_fake, disc_real)]
+
+            d_loss_fake = [X ** 2 for X in disc_fake]
+            d_loss_real = [(X - 1) ** 2 for X in disc_real]
 
             d_loss_total = [nd.mean(X + Y) * 0.5 for X, Y in zip(d_loss_real, d_loss_fake)]
 
-            for l in d_loss_total:
-                l.backward()
+        for l in d_loss_total:
+            l.backward()
 
-            self.trainer_d.step(x[0].shape[0])
-            curr_dloss = nd.mean(sum(d_loss_total) / len(self.ctx)).asscalar()
+        self.trainer.step(latent_z[0].shape[0])
+        curr_dloss = nd.mean(sum(d_loss_total) / len(self.ctx)).asscalar()
         return curr_dloss
 
     def increase_scale(self):
-        #TODO USE IN_MEMORY FILE FOR SPEED
-        self.generator.save_params('tmp_D')
-        self.scale += 1
-        self.generator = Generator(self.features, self.scale)
-        self.generator.collect_params().initialize(mx.init.Xavier(magnitude=2.24), ctx=self.ctx)
-        self.generator.load_params('tmp_D', ctx=self.ctx, allow_missing=True, ignore_extra=True)
+        self.discriminator.change_scale(self.ctx)
+
 
