@@ -24,7 +24,7 @@ class ArtLoader(gluon.data.Dataset):
             img = cv2.resize(img, (int(w/ h * self.final_resolution), self.final_resolution), interpolation=cv2.INTER_CUBIC)
         size = (self.final_resolution, int(w/h*self.final_resolution)) if h<w \
             else (int(h/w*self.final_resolution), self.final_resolution)
-        img = cv2.resize(img, size)
+        img = cv2.resize(img, size, interpolation=cv2.INTER_CUBIC)
         h, w, _ = img.shape
         if h<w:
             x = random.randint(0, w - self.final_resolution)
@@ -33,9 +33,9 @@ class ArtLoader(gluon.data.Dataset):
             x = random.randint(0, h - self.final_resolution)
             img = img[x:x + self.final_resolution,:,:]
         if random.random()<0.5:
-            img = img[::-1,:,:]
+            img = img[:,::-1,:]
 
-        img = np.transpose(img, axes=(2,0,1)).astype(np.float32) / 255.0
+        img = (np.transpose(img, axes=(2,0,1)).astype(np.float32) / 127.5) - 1
         return img
 
     def __len__(self):

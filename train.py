@@ -12,12 +12,11 @@ KIMAGE = 1_200_000
 BATCH_SIZE = 64
 EPS = 1e-8
 ctx = [mx.gpu(i) for i in range(GPU_COUNT)]
-generator = GeneratorWrapper(ctx, init_scale=2)
-discriminator = DiscriminatorWrapper(ctx, init_scale=2)
+generator = GeneratorWrapper(ctx, init_scale=3)
+discriminator = DiscriminatorWrapper(ctx, init_scale=6)
 
-
-config = {'resolutions': [16, 32, 64, 128,256, 512],
-          'batch_sizes': [64, 64, 32, 16, 8,   4]}
+config = {'resolutions': [32 ,64, 128,256, 512],
+          'batch_sizes': [128,64,64, 16,   8]}
 
 #TODO LOGGER CONFIG
 logger = SummaryWriter('/data/tensorboard-runs/art/')
@@ -26,6 +25,8 @@ logger = SummaryWriter('/data/tensorboard-runs/art/')
 k = 0
 for resolution, batch_size in zip(config['resolutions'], config['batch_sizes']):
     train_data = gluon.data.DataLoader(
+        #/data/cats/Cat Annotation Dataset/cats_bigger_than_64x64
+        #/data/art/wikiart-downloader/style/all/abstract-expressionism/
         ArtLoader(folder='/data/art/wikiart-downloader/style/all/abstract-expressionism/',
                   final_resolution=resolution), batch_size=batch_size,
         num_workers=8, shuffle=True, last_batch='rollover')
@@ -40,6 +41,8 @@ for resolution, batch_size in zip(config['resolutions'], config['batch_sizes']):
         latent_z = mx.nd.random_normal(0, 1, shape=(batch_size, 100, 1, 1))
         generator.generator.set_alpha(i / KIMAGE + EPS)
         discriminator.discriminator.set_alpha(i / KIMAGE + EPS)
+        # generator.generator.set_alpha(1)
+        # discriminator.discriminator.set_alpha(1)
 
         d_loss = discriminator.train(data_true, latent_z, generator)
         g_loss = generator.train(data_true, latent_z, discriminator)
@@ -51,7 +54,7 @@ for resolution, batch_size in zip(config['resolutions'], config['batch_sizes']):
         if time.time()-timer>30:
             timer = time.time()
             logger.add_scalar('D_loss', np.mean(d_loss), k)
-            logger.add_scalar('alpha', 1-i/KIMAGE, k)
+
             logger.add_scalar('G_loss', np.mean(g_loss), k)
             latent_z = mx.nd.random_normal(0, 1, shape=(batch_size, 100, 1, 1), ctx=ctx[0])
             images = generator.forward(latent_z)
@@ -61,10 +64,51 @@ for resolution, batch_size in zip(config['resolutions'], config['batch_sizes']):
             true_image = np.concatenate((data_true[0].asnumpy(),
                                          data_true[1].asnumpy(),
                                          data_true[2].asnumpy(),), axis=2)
-            logger.add_image('true_data', np.transpose((np.clip(true_image * 255.0,0,255)).astype('int16'), axes=[1, 2, 0]), k)
-            logger.add_image('fake_data', np.transpose((np.clip(result_image * 255.0,0,255)).astype('int16'), axes=[1, 2, 0]), k)
-    generator.save(f'g_lsgan_{resolution}')
-    discriminator.save(f'g_lsgan_{resolution}')
+            logger.add_image('true_data',
+                             np.transpose((np.clip((true_image + 1) * 127.5, 0, 255)).astype('int16'), axes=[1, 2, 0]),
+                             k)
+            logger.add_image('fake_data',
+                             np.transpose((np.clip((result_image + 1) * 127.5, 0, 255)).astype('int16'),
+                                          axes=[1, 2, 0]), k)
+
+    generator.generator.set_alpha(1)
+    discriminator.discriminator.set_alpha(1)
+    i = 0
+    pbar = tqdm(total=KIMAGE//2)
+    while i < KIMAGE//2:
+        true_image = data_iterator.__next__()
+        data_true = true_image
+        latent_z = mx.nd.random_normal(0, 1, shape=(batch_size, 100, 1, 1))
+
+        d_loss = discriminator.train(data_true, latent_z, generator)
+        g_loss = generator.train(data_true, latent_z, discriminator)
+
+        i += batch_size
+        k += batch_size
+        pbar.update(batch_size)
+
+        if time.time() - timer > 30:
+            timer = time.time()
+            logger.add_scalar('D_loss', np.mean(d_loss), k)
+            logger.add_scalar('alpha', 1 - i / KIMAGE, k)
+            logger.add_scalar('G_loss', np.mean(g_loss), k)
+            latent_z = mx.nd.random_normal(0, 1, shape=(batch_size, 100, 1, 1), ctx=ctx[0])
+            images = generator.forward(latent_z)
+            result_image = np.concatenate((images[0].asnumpy(),
+                                           images[1].asnumpy(),
+                                           images[2].asnumpy(),), axis=2)
+            true_image = np.concatenate((data_true[0].asnumpy(),
+                                         data_true[1].asnumpy(),
+                                         data_true[2].asnumpy(),), axis=2)
+            logger.add_image('true_data',
+                             np.transpose((np.clip((true_image+1)*127.5, 0, 255)).astype('int16'), axes=[1, 2, 0]), k)
+            logger.add_image('fake_data',
+                             np.transpose((np.clip((result_image+1)*127.5, 0, 255)).astype('int16'), axes=[1, 2, 0]), k)
+
+
+    generator.save(f'g_rellsmeangan_{resolution}')
+    discriminator.save(f'd_rellsmeangan_{resolution}')
+
     generator.increase_scale()
     discriminator.increase_scale()
 
